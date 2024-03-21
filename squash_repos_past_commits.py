@@ -67,14 +67,14 @@ def squash_commits(branch):
 
         if current_author == next_author and time_difference <= SQUASH_TIME_DIFFERENCE:  # 2 weeks in seconds
             # Add the current commit to the squash group
-            current_squash_group.append(current_commit.split(' ')[0])  # Only add the commit hash
+            current_squash_group.append(
+                (current_commit.split(' ')[0], current_author))  # Add the commit hash and author
         else:
             # Squash the current group of commits if there's more than one commit in the group
             if current_squash_group and len(current_squash_group) > 1:
-                run_git_command(['reset', '--soft', current_squash_group[0] + '^'])
+                run_git_command(['reset', '--soft', current_squash_group[0][0] + '^'])
                 run_git_command(['commit', '-m', 'Squashed commit'])
-                squashed_commits.append(
-                    (current_squash_group, current_commit.split(' ')[0]))  # Only add the commit hash
+                squashed_commits.append((current_squash_group, current_commit.split(' ')[0]))
             current_squash_group = []
 
         # If the last commit was part of a squash, handle it separately
@@ -82,7 +82,8 @@ def squash_commits(branch):
         last_author = get_canonical_author(last_author)
         if commits[-2].rsplit(' ', 2)[1].lower() == last_author.lower() and int(
                 last_timestamp) <= time.time() - SQUASH_AGE_LIMIT:  # 2 months in seconds
-            current_squash_group.append(commits[-2].rsplit(' ', 2)[0].split(' ')[0])  # Only add the commit hash
+            current_squash_group.append(
+                (commits[-2].rsplit(' ', 2)[0].split(' ')[0], last_author))  # Add the commit hash and author
             if len(current_squash_group) > 1:
                 # Get the hash of the root commit
                 root_commit = run_git_command(['rev-list', '--max-parents=0', 'HEAD'])
@@ -95,8 +96,7 @@ def squash_commits(branch):
         run_git_command(['log', '--format=%B', '-n', '1', new_commit])
         concatenated_message = ""
         for old_commit in old_commits:
-            old_message = run_git_command(
-                ['log', '--format=%B', '-n', '1', old_commit.split(' ')[0]])  # Only use the commit hash
+            old_message = run_git_command(['log', '--format=%B', '-n', '1', old_commit[0]])  # Only use the commit hash
             concatenated_message += repr(old_message.strip()) + "\n"
         run_git_command(['commit', '--amend', '-m', concatenated_message])
         logging.info(f"was squashed into:\n{new_commit}: {concatenated_message.strip()}")
