@@ -6,7 +6,6 @@ logging.basicConfig(level=logging.INFO)
 
 # Define a list of developers, where each developer is a tuple containing their identifiers
 developers = [
-    ()
 ]
 
 # Define the time difference for consecutive commits from one author to be squashed
@@ -36,7 +35,7 @@ def get_branches():
         return [branch.strip().replace('origin/', '') for branch in branches if '->' not in branch]
     else:
         logging.error("Failed to get branches.")
-        return []
+        exit()
 
 
 def get_canonical_author(author):
@@ -50,7 +49,7 @@ def squash_commits(branch):
     run_git_command(['checkout', branch])
 
     # Get the list of commits in reverse order (oldest first)
-    commits = run_git_command(['log', '--reverse', '--pretty=format:"%H %an <%ae> %ct"', branch]).split('\n')
+    commits = run_git_command(['log', '--reverse', '--pretty=format:%H %an <%ae> %ct', branch]).split('\n')
 
     squashed_commits = []
     current_squash_group = []
@@ -68,30 +67,36 @@ def squash_commits(branch):
 
         if current_author == next_author and time_difference <= SQUASH_TIME_DIFFERENCE:  # 2 weeks in seconds
             # Add the current commit to the squash group
-            current_squash_group.append(current_commit)
+            current_squash_group.append(current_commit.split(' ')[0])  # Only add the commit hash
         else:
-            # Squash the current group of commits
-            if current_squash_group:
+            # Squash the current group of commits if there's more than one commit in the group
+            if current_squash_group and len(current_squash_group) > 1:
                 run_git_command(['reset', '--soft', current_squash_group[0] + '^'])
                 run_git_command(['commit', '-m', 'Squashed commit'])
-                squashed_commits.append((current_squash_group, current_commit))
+                squashed_commits.append(
+                    (current_squash_group, current_commit.split(' ')[0]))  # Only add the commit hash
             current_squash_group = []
 
-    # If the last commit was part of a squash, handle it separately
-    last_commit, last_author, last_timestamp = commits[-1].rsplit(' ', 2)
-    last_author = get_canonical_author(last_author)
-    if commits[-2].rsplit(' ', 2)[1].lower() == last_author.lower() and int(last_timestamp) <= time.time() - SQUASH_AGE_LIMIT:  # 2 months in seconds
-        current_squash_group.append(commits[-2].rsplit(' ', 2)[0])
-        run_git_command(['reset', '--soft', '--root'])
-        run_git_command(['commit', '-m', 'Squashed commit'])
-        squashed_commits.append((current_squash_group, last_commit))
+        # If the last commit was part of a squash, handle it separately
+        last_commit, last_author, last_timestamp = commits[-1].rsplit(' ', 2)
+        last_author = get_canonical_author(last_author)
+        if commits[-2].rsplit(' ', 2)[1].lower() == last_author.lower() and int(
+                last_timestamp) <= time.time() - SQUASH_AGE_LIMIT:  # 2 months in seconds
+            current_squash_group.append(commits[-2].rsplit(' ', 2)[0].split(' ')[0])  # Only add the commit hash
+            if len(current_squash_group) > 1:
+                # Get the hash of the root commit
+                root_commit = run_git_command(['rev-list', '--max-parents=0', 'HEAD'])
+                run_git_command(['reset', '--soft', root_commit])
+                run_git_command(['commit', '-m', 'Squashed commit'])
+                squashed_commits.append((current_squash_group, last_commit.split(' ')[0]))  # Only
 
     # Log the squashed commits and concatenate the commit messages
     for old_commits, new_commit in squashed_commits:
         run_git_command(['log', '--format=%B', '-n', '1', new_commit])
         concatenated_message = ""
         for old_commit in old_commits:
-            old_message = run_git_command(['log', '--format=%B', '-n', '1', old_commit])
+            old_message = run_git_command(
+                ['log', '--format=%B', '-n', '1', old_commit.split(' ')[0]])  # Only use the commit hash
             concatenated_message += repr(old_message.strip()) + "\n"
         run_git_command(['commit', '--amend', '-m', concatenated_message])
         logging.info(f"was squashed into:\n{new_commit}: {concatenated_message.strip()}")
