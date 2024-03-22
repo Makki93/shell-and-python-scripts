@@ -14,7 +14,7 @@ developers = [
 SQUASH_TIME_DIFFERENCE = 60 * 60 * 24 * 14  # 2 weeks in seconds
 
 # Define the age limit for squashing commits
-SQUASH_AGE_LIMIT = 60 * 60 * 24 * 60  # 2 months in seconds
+SQUASH_AGE_LIMIT = 60 * 60 * 24 * 14
 
 # Flatten the developer identifiers into a dictionary for easy lookup
 # Convert all identifiers to lowercase for case-insensitive comparison
@@ -63,69 +63,84 @@ def squash_commits(branch):
     squashed_commits = []
     current_squash_group = []
 
-    for i in range(len(commits)):
-        current_commit, current_author, current_timestamp = commits[i].rsplit(' ', 2)
+    for i, commit_info in enumerate(commits):
+        commit_data = commit_info.rsplit(' ', 3)
+        current_commit, current_author, current_timestamp, parents = commit_data
+        parent_count = len(parents.split())
 
-        # Determine if this is the last commit
-        is_last_commit = (i == len(commits) - 1)
-
-        # Get the canonical author identities
+        # Get the canonical author identity
         current_author = get_canonical_author(current_author)
 
-        # Calculate the time difference between the current commit and the next commit
-        if not is_last_commit:
-            next_commit, next_author, next_timestamp = commits[i + 1].rsplit(' ', 2)
-            next_author = get_canonical_author(next_author)
-            time_difference = int(next_timestamp) - int(current_timestamp)
-        else:
-            time_difference = None
+        # Get the commit message for further checks
+        commit_message = run_git_command(['log', '--format=%B', '-n', '1', current_commit])
+
+        # Determine if this is a revert commit or a tagged commit
+        is_revert_commit = 'revert' in commit_message.lower()
+        is_tagged_commit = run_git_command(['tag', '--contains', current_commit]) != ''
 
         # Check if the current commit is older than the SQUASH_AGE_LIMIT
         if time.time() - int(current_timestamp) > SQUASH_AGE_LIMIT:
             continue
 
-        # Determine if commits should be squashed
-        if not is_last_commit and current_author == next_author and time_difference > 0 and time_difference <= SQUASH_TIME_DIFFERENCE:
-            # Add the current commit and author to the squash group
-            current_squash_group.append((current_commit, current_author))
-        else:
-            # Squash the current group of commits if there's more than one commit in the group
+        # If it's a special commit, process the current squash group and skip adding the special commit to any group
+        if is_revert_commit or is_tagged_commit:
             if len(current_squash_group) > 1:
+                # Squash the current group of commits
                 start = current_squash_group[0][0]
-                end = current_commit  # Use the current commit as the end if it's the last or the authors differ
+                end = current_squash_group[-1][0]
+                squash_commit_group(current_squash_group, start, end)
+                squashed_commits.append((current_squash_group, end))
+            current_squash_group = []  # Reset the squash group
+            continue  # Skip the special commit and continue with the next commit
 
-                # Combine commit messages from the squashed commits
-                combined_message = '\n\n'.join(
-                    [run_git_command(['log', '--format=%B', '-n', '1', commit]) for commit, _ in
-                     current_squash_group])
+        # Determine if the next commit should be added to the current squash group
+        if i < len(commits) - 1:
+            next_commit_info = commits[i + 1].rsplit(' ', 3)
+            next_commit, next_author, next_timestamp = next_commit_info[:3]
+            next_author = get_canonical_author(next_author)
+            time_difference = int(next_timestamp) - int(current_timestamp)
 
-                tmpfile_name = None
-                try:
-                    # Create a temporary file to write the new commit message to
-                    with tempfile.NamedTemporaryFile(mode='w+', delete=False) as tmpfile:
-                        tmpfile.write(combined_message)
-                        tmpfile_name = tmpfile.name
-
-                    # Perform the rebase without the interactive mode
-                    run_git_command(['rebase', '--onto', start + '^', start, end, '--msg-file', tmpfile_name])
-
+            if current_author == next_author and 0 < time_difference <= SQUASH_TIME_DIFFERENCE:
+                current_squash_group.append((current_commit, current_author))
+            else:
+                # Process the current squash group if the next author is different or the time difference is too large
+                if len(current_squash_group) > 1:
+                    start = current_squash_group[0][0]
+                    end = current_commit
+                    squash_commit_group(current_squash_group, start, end)
                     squashed_commits.append((current_squash_group, end))
-                except Exception as e:
-                    logging.error(f"Rebase failed: {e}")
-                    break
-                finally:
-                    # Remove the temporary file if it was created
-                    if tmpfile_name and os.path.exists(tmpfile_name):
-                        os.remove(tmpfile_name)
-
-            # Reset the current squash group for the next round of squashing
-            current_squash_group = [(current_commit, current_author)] if not is_last_commit else []
+                current_squash_group = [(current_commit, current_author)]
+        else:
+            # If it's the last commit in the list, add it to the current squash group
+            current_squash_group.append((current_commit, current_author))
 
     # Log the squashed commits
     for old_commits, new_commit in squashed_commits:
         squashed_commit_message = run_git_command(['log', '--format=%B', '-n', '1', new_commit])
         logging.info(
             f"Commits {[(commit, author) for commit, author in old_commits]} were squashed into:\n{new_commit}: {squashed_commit_message.strip()}")
+
+
+def squash_commit_group(commit_group, start, end):
+    """Squash a group of commits."""
+    combined_message = '\n\n'.join(
+        [run_git_command(['log', '--format=%B', '-n', '1', commit]) for commit, _ in commit_group])
+
+    tmpfile_name = None
+    try:
+        # Create a temporary file to write the new commit message to
+        with tempfile.NamedTemporaryFile(mode='w+', delete=False) as tmpfile:
+            tmpfile.write(combined_message)
+            tmpfile_name = tmpfile.name
+
+        # Perform the rebase without the interactive mode
+        run_git_command(['rebase', '--onto', start + '^', start, end, '--msg-file', tmpfile_name])
+    except Exception as e:
+        logging.error(f"Rebase failed: {e}")
+    finally:
+        # Remove the temporary file if it was created
+        if tmpfile_name and os.path.exists(tmpfile_name):
+            os.remove(tmpfile_name)
 
 
 def main():
