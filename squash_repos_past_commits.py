@@ -3,12 +3,14 @@ import subprocess
 import logging
 import tempfile
 import time
+import re
 
 logging.basicConfig(level=logging.INFO)
 
 # Define a list of developers, where each developer is a tuple containing their identifiers
 developers = [
 ]
+# TODO: Name könnte vertauscht sein
 
 # Define the time difference for consecutive commits from one author to be squashed
 SQUASH_TIME_DIFFERENCE = 60 * 60 * 24 * 14  # 2 weeks in seconds
@@ -83,85 +85,111 @@ def squash_commits(branch):
     current_jira_number = None  # Keep track of the current JIRA number
 
     for i, commit_info in enumerate(commits):
-        commit_data = commit_info.rsplit(' ', 3)
-        current_commit, current_author, current_timestamp = commit_data[:3]
-
-        # Get the canonical author identity
-        current_author = get_canonical_author(current_author)
+        commit_data = commit_info.rsplit(' ', 5)
+        if ' ' in commit_data:
+            raise Exception(f"Invalid commit format: {commit_info}")
+        current_author, current_commit, current_timestamp = extract_commit_info(commit_data)
 
         # Get the commit message for further checks
         commit_message = run_git_command(['log', '--format=%B', '-n', '1', current_commit])
 
         # Determine if this is a revert commit or a tagged commit
+        is_merge_commit = 'pull' in commit_message.lower() or 'merge' in commit_message.lower()
         is_revert_commit = 'revert' in commit_message.lower()
         is_tagged_commit = run_git_command(['tag', '--contains', current_commit]) != ''
 
         # Check if the current commit is older than the SQUASH_AGE_LIMIT
-        if time.time() - int(current_timestamp) > SQUASH_AGE_LIMIT:
-            continue
+        # if time.time() - int(current_timestamp) > SQUASH_AGE_LIMIT:
+        # continue
 
         # If it's a special commit, process the current squash group and skip adding the special commit to any group
-        if is_revert_commit or is_tagged_commit:
+        if is_merge_commit or is_revert_commit or is_tagged_commit:
             if len(current_squash_group) > 1:
-                # Squash the current group of commits
-                start = current_squash_group[0][0]
-                end = current_squash_group[-1][0]
-                squash_commit_group(current_squash_group, start, end)
-                squashed_commits.append((current_squash_group, end))
-            current_squash_group = []  # Reset the squash group
-            current_jira_number = None  # Reset the JIRA number
+                squash_current_group(current_squash_group, squashed_commits)
+            current_squash_group = []
+            current_jira_number = None
             continue  # Skip the special commit and continue with the next commit
 
         # Extract JIRA number from the current commit message
-        commit_jira_number = extract_jira_number(commit_message)
+        next_jira_number = extract_jira_number(commit_message)
 
         # Determine if the next commit should be added to the current squash group
         if i < len(commits) - 1:
-            next_commit_info = commits[i + 1].rsplit(' ', 3)
-            next_commit, next_author, next_timestamp = next_commit_info[:3]
-            next_author = get_canonical_author(next_author)
+            next_commit_info = commits[i + 1].rsplit(' ', 5)
+            if ' ' in commit_data:
+                raise Exception(f"Invalid commit format: {commit_info}")
+
+            next_author, next_commit, next_timestamp = extract_commit_info(next_commit_info)
+
+            # Get the commit message for further checks
+            next_commit_message = run_git_command(['log', '--format=%B', '-n', '1', next_commit])
+
+            # Determine if this is a revert commit or a tagged commit
+            next_is_merge_commit = 'pull' in next_commit_message.lower() or 'merge' in next_commit_message.lower()
+            next_is_revert_commit = 'revert' in next_commit_message.lower()
+            next_is_tagged_commit = run_git_command(['tag', '--contains', next_commit]) != ''
+
             time_difference = int(next_timestamp) - int(current_timestamp)
 
             # Check if current and next commits are from the same author
             if current_author == next_author and 0 < time_difference <= SQUASH_TIME_DIFFERENCE:
-                # Check if the JIRA numbers are the same or if either commit does not have a JIRA number
-                if commit_jira_number == current_jira_number or not commit_jira_number or not current_jira_number:
+                if jira_number_matches_or_is_irrelevant(current_jira_number, next_jira_number):
                     current_squash_group.append((current_commit, current_author))
-                    current_jira_number = commit_jira_number or current_jira_number
+                    current_jira_number = next_jira_number or current_jira_number
                 else:
                     # JIRA numbers are different, process the current group and start a new one
                     if len(current_squash_group) > 1:
-                        start = current_squash_group[0][0]
-                        end = current_squash_group[-1][0]
-                        squash_commit_group(current_squash_group, start, end)
-                        squashed_commits.append((current_squash_group, end))
-                    current_squash_group = [(current_commit, current_author)]
-                    current_jira_number = commit_jira_number
+                        squash_current_group(current_squash_group, squashed_commits)
+                    current_squash_group = []
+                    current_jira_number = None
             else:
                 # Process the current squash group if the next author is different or the time difference is too large
                 if len(current_squash_group) > 1:
-                    start = current_squash_group[0][0]
-                    end = current_commit
-                    squash_commit_group(current_squash_group, start, end)
-                    squashed_commits.append((current_squash_group, end))
-                current_squash_group = [(current_commit, current_author)]
-                current_jira_number = None  # Reset the JIRA number
+                    squash_current_group(current_squash_group, squashed_commits)
+                current_squash_group = []
+                current_jira_number = None
         else:
             # If it's the last commit in the list, add it to the current squash group
             current_squash_group.append((current_commit, current_author))
 
     # Process the last squash group if it has more than one commit
     if len(current_squash_group) > 1:
-        start = current_squash_group[0][0]
-        end = current_squash_group[-1][0]
-        squash_commit_group(current_squash_group, start, end)
-        squashed_commits.append((current_squash_group, end))
+        squash_current_group(current_squash_group, squashed_commits)
 
-    # Log the squashed commits
-    for old_commits, new_commit in squashed_commits:
-        squashed_commit_message = run_git_command(['log', '--format=%B', '-n', '1', new_commit])
-        logging.info(
-            f"Commits {[(commit, author) for commit, author in old_commits]} were squashed into:\n{new_commit}: {squashed_commit_message.strip()}")
+        # Log the squashed commits
+        for old_commits, new_commit in squashed_commits:
+            squashed_commit_message = run_git_command(['log', '--format=%B', '-n', '1', new_commit])
+            logging.info(
+                f"Commits {[(commit, author) for commit, author in old_commits]} were squashed into:\n{new_commit}: {squashed_commit_message.strip()}")
+
+
+def jira_number_matches_or_is_irrelevant(current_jira_number, next_jira_number):
+    return next_jira_number == current_jira_number or not next_jira_number or not current_jira_number
+
+
+def extract_commit_info(commit_data):
+    current_commit = commit_data[0]
+    other = commit_data[1:-1]
+    current_timestamp = commit_data[-1]
+    email = None
+    for i, part in enumerate(other):
+        if "@" in part:
+            email = part.strip('<>')
+            email_index = i
+            break
+    if email is None:
+        raise Exception(f"Email address is missing in the commit data: {commit_data}")
+    del other[email_index]
+    current_author = ' '.join(other)
+    current_author = get_canonical_author(current_author)
+    return current_author, current_commit, current_timestamp
+
+
+def squash_current_group(current_squash_group, squashed_commits):
+    start = current_squash_group[0][0]
+    end = current_squash_group[-1][0]  # end = current_commit
+    squash_commit_group(current_squash_group, start, end)
+    squashed_commits.append((current_squash_group, end))
 
 
 def squash_commit_group(commit_group, start, end):
@@ -177,13 +205,15 @@ def squash_commit_group(commit_group, start, end):
             tmpfile_name = tmpfile.name
 
         # Perform the rebase without the interactive mode
-        run_git_command(['rebase', '--onto', start + '^', start, end, '--msg-file', tmpfile_name])
+        run_git_command(['rebase', '--onto', start + '^', start, end])
+        # run_git_command(['rebase', '--onto', start + '^', start, end, '--msg-file', tmpfile_name])
     except Exception as e:
         logging.error(f"Rebase failed: {e}")
-    finally:
+
         # Remove the temporary file if it was created
         if tmpfile_name and os.path.exists(tmpfile_name):
             os.remove(tmpfile_name)
+        raise
 
 
 def main():
