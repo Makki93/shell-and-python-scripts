@@ -16,9 +16,8 @@ SQUASH_TIME_DIFFERENCE = 60 * 60 * 24 * 14  # 2 weeks in seconds
 # Define the age limit for squashing commits
 SQUASH_AGE_LIMIT = 60 * 60 * 24 * 14
 
-# Flatten the developer identifiers into a dictionary for easy lookup
-# Convert all identifiers to lowercase for case-insensitive comparison
-author_map = {identifier.lower(): dev[0] for dev in developers for identifier in dev if identifier}
+# Create a dictionary mapping each identifier to the primary email of a developer
+author_map = {identifier.lower(): dev[0].lower() for dev in developers for identifier in dev}
 
 
 def run_git_command(command, timeout=30):
@@ -47,8 +46,9 @@ def get_branches():
 
 
 def get_canonical_author(author):
-    """Get the canonical author identity, ignoring capitalization."""
-    return author_map.get(author.lower(), author)
+   """Get the canonical author identity by checking against all known identifiers."""
+   # Look up the primary email using the provided author identifier
+   return author_map.get(author.lower(), author)
 
 
 def squash_commits(branch):
@@ -75,8 +75,7 @@ def squash_commits(branch):
 
     for i, commit_info in enumerate(commits):
         commit_data = commit_info.rsplit(' ', 3)
-        current_commit, current_author, current_timestamp, parents = commit_data
-        parent_count = len(parents.split())
+        current_commit, current_author, current_timestamp = commit_data[:3]
 
         # Get the canonical author identity
         current_author = get_canonical_author(current_author)
@@ -105,24 +104,25 @@ def squash_commits(branch):
 
         # Determine if the next commit should be added to the current squash group
         if i < len(commits) - 1:
-            next_commit_info = commits[i + 1].rsplit(' ', 3)
-            next_commit, next_author, next_timestamp = next_commit_info[:3]
-            next_author = get_canonical_author(next_author)
-            time_difference = int(next_timestamp) - int(current_timestamp)
+           next_commit_info = commits[i + 1].rsplit(' ', 3)
+           next_commit, next_author, next_timestamp = next_commit_info[:3]
+           next_author = get_canonical_author(next_author)
+           time_difference = int(next_timestamp) - int(current_timestamp)
 
-            if current_author == next_author and 0 < time_difference <= SQUASH_TIME_DIFFERENCE:
-                current_squash_group.append((current_commit, current_author))
-            else:
-                # Process the current squash group if the next author is different or the time difference is too large
-                if len(current_squash_group) > 1:
-                    start = current_squash_group[0][0]
-                    end = current_commit
-                    squash_commit_group(current_squash_group, start, end)
-                    squashed_commits.append((current_squash_group, end))
-                current_squash_group = [(current_commit, current_author)]
+           # Check if current and next commits are from the same author
+           if current_author == next_author and 0 < time_difference <= SQUASH_TIME_DIFFERENCE:
+               current_squash_group.append((current_commit, current_author))
+           else:
+               # Process the current squash group if the next author is different or the time difference is too large
+               if len(current_squash_group) > 1:
+                   start = current_squash_group[0][0]
+                   end = current_commit
+                   squash_commit_group(current_squash_group, start, end)
+                   squashed_commits.append((current_squash_group, end))
+               current_squash_group = [(current_commit, current_author)]
         else:
-            # If it's the last commit in the list, add it to the current squash group
-            current_squash_group.append((current_commit, current_author))
+           # If it's the last commit in the list, add it to the current squash group
+           current_squash_group.append((current_commit, current_author))
 
     # Log the squashed commits
     for old_commits, new_commit in squashed_commits:
