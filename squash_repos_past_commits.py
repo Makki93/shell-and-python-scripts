@@ -21,15 +21,18 @@ SQUASH_AGE_LIMIT = 60 * 60 * 24 * 14
 author_map = {identifier.lower(): dev[0] for dev in developers for identifier in dev if identifier}
 
 
-def run_git_command(command, timeout=30, check=True):
-    """Run a git command with a timeout and return its output, optionally check for errors."""
+def run_git_command(command, timeout=30):
+    """Run a git command with a timeout and return its output, check for errors."""
     try:
         process = subprocess.run(['git'] + command, capture_output=True, text=True, timeout=timeout)
-        if check and process.returncode != 0:
-            raise Exception(f"Git command failed: {' '.join(command)}\n{process.stderr}")
+        process.check_returncode()  # This will raise CalledProcessError if the command failed
         return process.stdout.strip()
-    except subprocess.TimeoutExpired:
-        raise Exception(f"Git command timed out: {' '.join(command)}")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Git command failed with error: {e.stderr}")
+        raise  # Re-raise the exception to be caught by the calling function
+    except subprocess.TimeoutExpired as e:
+        logging.error(f"Git command timed out: {' '.join(command)}")
+        raise  # Re-raise the exception to be caught by the calling function
 
 
 def get_branches():
@@ -54,8 +57,15 @@ def squash_commits(branch):
         # Check out the branch
         run_git_command(['checkout', branch])
     except Exception as e:
-        logging.error(f"Checkout failed: {e}")
-        return  # Exit the function if checkout fails
+        logging.error(f"An error occurred while processing {branch}: {e}")
+        logging.info("Attempting to reset the branch to its original state.")
+        try:
+            run_git_command(['reset', '--hard', 'ORIG_HEAD'])  # Reset to the state before rebase
+            logging.info(f"Branch {branch} has been reset to its original state.")
+        except Exception as reset_e:
+            logging.error(f"Failed to reset branch {branch}: {reset_e}")
+        raise  # Re-raise the original exception to stop the script
+
 
     # Get the list of commits in reverse order (oldest first)
     commits = run_git_command(['log', '--reverse', '--pretty=format:%H %an <%ae> %ct', branch]).split('\n')
@@ -144,14 +154,19 @@ def squash_commit_group(commit_group, start, end):
 
 
 def main():
-    branches = get_branches()
+    try:
+        branches = get_branches()
 
-    for branch in branches:
-        squash_commits(branch)
+        for branch in branches:
+            squash_commits(branch)
 
-    print("Done squashing commits. Please review the changes before pushing.")
-    print("If you're satisfied with the changes, you can push all branches to the new repository with:")
-    print("git push --all <new-repo-url>")
+        print("Done squashing commits. Please review the changes before pushing.")
+        print("If you're satisfied with the changes, you can push all branches to the new repository with:")
+        print("git push --all <new-repo-url>")
+
+    except Exception as e:
+        logging.error("Script terminated due to an error. Please check the logs for details.")
+        exit(1)  # Non-zero exit code to indicate failure
 
 
 if __name__ == "__main__":
